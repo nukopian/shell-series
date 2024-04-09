@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+#
+# series - select an entire column or range of column from a table
+
+function series_usage() {
+	cat >&2 <<EOF
+series - select one or more columns from a table
+
+SYNOPSIS
+	series [options] [--]
+
+    Options:
+	-f, --fields columns
+	-d, --delimiter awk-field-separator
+	-s, --separator string
+	-r, --rows style
+	-t, --table
+	    --csv
+	    --list
+	    --tuple
+	    --set
+	-H, --no-header
+	-S, --no-separator
+	-Q, --no-quotes
+	-h, --help
+
+    style:
+	a string used to define the opening and closing characters that wrap
+	each row of the series and the final flattened result:
+
+		style := [opening][quote]
+		opening := "(" | "[" | "{"
+		quote := "'" | "\""
+
+SEE ALSO
+	man series
+EOF
+	exit 1
+}
+
+set -u -f -o noglob -o pipefail
+set -- $(getoptions -B -f -o 'r|rows:,s|separator:,H|no-header,S|no-separator,f|fields:,d|delimiter:,t|table,csv,list,tuple,set,Q|no-quotes,h|help' -- "$@")
+
+r_o=""
+rob=""
+roq=""
+r_c=""
+rcq=""
+rcb=""
+sep=" "
+table=""
+delim=""
+nr=0
+fields="1-"
+while [[ $# -gt 0 && ${1:0:1} == "-" ]]; do
+  	case "$1" in
+		--rows)
+			if [[ ${2^^} == NONE ]]; then
+				r_o=""
+				rob=""
+				roq=""
+				r_c=""
+				rcq=""
+				rcb=""
+			elif [[ $2 =~ ^([\(\{\[]?)([\'\"]?) ]]; then
+				r_o="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+				if [[ ${#r_o} -gt 0 ]]; then
+					if [[ ${#r_o} -gt 1 ]]; then
+						roq="${r_o:1:1}"
+						rcq="${r_o:1:1}"
+					fi
+					if [[ ${r_o:0:1} =~ ^[\'\"]$ ]]; then
+						roq="${r_o:0:1}"
+						rcq="${r_o:0:1}"
+					elif [[ ${r_o:0:1} == '(' ]]; then
+						rob="${r_o:0:1}"
+						rcb=")"
+					elif [[ ${r_o:0:1} == '[' ]]; then
+						rob="${r_o:0:1}"
+						rcb="]"
+					elif [[ ${r_o:0:1} == '{' ]]; then
+						rob="${r_o:0:1}"
+						rcb="}"
+					else
+						echo "Invalid string: $2" >&2
+						exit 1
+					fi
+				else
+					echo "Invalid string: $2" >&2
+					exit 1
+				fi
+			else
+				echo "Invalid string: $2" >&2
+				exit 1
+			fi
+			shift 2
+			;;
+		--separator)
+			if [[ ${2^^} == SPACE ]]; then
+				sep=" "
+			elif [[ ${2^^} == NONE ]]; then
+				sep=""
+			else
+				sep="$2"
+			fi
+			shift 2
+			;;
+		--fields)
+			fields="$2"
+			shift 2
+			;;
+		--delimiter)
+			delim="-F$2"
+			shift 2
+			;;
+		--table)
+			table=true
+			sep=" "
+			roq=""
+			rcq=$roq
+			shift
+			;;
+		--csv)
+			sep=","
+			roq='"'
+			rcq=$roq
+			shift
+			;;
+		--list)
+			sep=","
+			roq="'"
+			rcq=$roq
+			rob="["
+			rcb="]"
+			shift
+			;;
+		--tuple)
+			sep=","
+			roq="'"
+			rcq=$roq
+			rob="("
+			rcb=")"
+			shift
+			;;
+		--set)
+			sep=","
+			roq="'"
+			rcq=$roq
+			rob="{"
+			rcb="}"
+			shift
+			;;
+		--no-header)
+			nr=1
+			shift
+			;;
+		--no-separator)
+			sep=""
+			shift
+			;;
+		--no-quotes)
+			roq=""
+			rcq=$roq
+			shift
+			;;
+		--)
+			shift
+			break
+			;;
+		-?|--help)
+			series_usage
+			exit 1
+			;;
+		*)
+			exit 1
+			;;
+	esac
+done
+
+prog='NR>'$nr'{'
+prog+='printf "%s", rob;'
+OIFS=$IFS
+IFS=, read -ra fields <<< "$fields"
+fnum=0
+for field in "${fields[@]}"; do
+	((fnum++))
+	case $field in
+	*-*)
+		lo=${field%-*}
+		hi=${field#*-}
+		[[ -z $lo ]] && lo=1
+		[[ -z $hi ]] && hi=NF
+		;;
+	"")
+		;;
+	*)
+		lo=$field
+		hi=$field
+		;;
+	esac
+	[[ $fnum -eq 1 ]] && prog+='printf ob;'
+	if [[ $lo == $hi ]]; then
+		prog+='printf "%s%s%s", roq, $'$lo', rcq;'
+		[[ $fnum -lt ${#fields[@]} ]] && prog+='printf "%s", sep;'
+	else
+		prog+='for (i='$lo';i<='$hi';++i) {'
+		prog+='printf "%s%s%s", roq, $i, rcq;'
+		prog+='if (i<'$hi') printf "%s", sep;'
+		prog+='}'
+		[[ $fnum -lt ${#fields[@]} ]] && prog+='printf "%s", sep;'
+	fi
+	[[ $fnum -eq ${#fields[@]} ]] && prog+='printf cb;'
+done
+prog+='printf "%s\n", rcb;'
+prog+='}'
+IFS=$OIFS
+
+if [[ -n $delim ]]; then
+	if [[ $sep =~ ^[[:space:]]+$ ]]; then
+		if [[ -n $table ]]; then
+			awk -v "sep=$sep" -v "roq=$roq" -v "rcq=$rcq" -v "rob=$rob" -v "rcb=$rcb" "$delim" "$prog" | column -t
+		else
+			awk -v "sep=$sep" -v "roq=$roq" -v "rcq=$rcq" -v "rob=$rob" -v "rcb=$rcb" "$delim" "$prog"
+		fi
+	else
+		awk -v "sep=$sep" -v "roq=$roq" -v "rcq=$rcq" -v "rob=$rob" -v "rcb=$rcb" "$delim" "$prog"
+	fi
+else
+	if [[ $sep =~ ^[[:space:]]+$ ]]; then
+		if [[ -n $table ]]; then
+			awk -v "sep=$sep" -v "roq=$roq" -v "rcq=$rcq" -v "rob=$rob" -v "rcb=$rcb" "$prog" | column -t
+		else
+			awk -v "sep=$sep" -v "roq=$roq" -v "rcq=$rcq" -v "rob=$rob" -v "rcb=$rcb" "$prog"
+		fi
+	else
+		awk -v "sep=$sep" -v "roq=$roq" -v "rcq=$rcq" -v "rob=$rob" -v "rcb=$rcb" "$prog"
+	fi
+fi
